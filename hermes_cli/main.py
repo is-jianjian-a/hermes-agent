@@ -12654,12 +12654,9 @@ def main():
         "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
     )
 
-    sessions_archive_tui = sessions_subparsers.add_parser(
-        "archive-tui",
-        help="Interactive archive manager — browse and toggle session archive status",
-    )
-    sessions_archive_tui.add_argument(
-        "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
+    sessions_archive_gui = sessions_subparsers.add_parser(
+        "archive-gui",
+        help="Open GUI window to browse and manage session archives",
     )
 
     def _confirm_prompt(prompt: str) -> bool:
@@ -12860,16 +12857,11 @@ def main():
             relaunch(["--resume", selected_id])
             return  # won't reach here after execvp
 
-        elif action == "archive-tui":
-            limit = getattr(args, "limit", 500) or 500
-            sessions = db.list_sessions_rich(
-                include_archived=True, limit=limit
-            )
-            if not sessions:
-                print("No sessions found.")
-                db.close()
-                return
-            _session_archive_picker(db, sessions)
+        elif action == "archive-gui":
+            from hermes_cli.session_archive_gui import launch_archive_gui
+            db.close()
+            launch_archive_gui()
+            return
 
         elif action == "optimize":
             db_path = db.db_path
