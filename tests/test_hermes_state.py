@@ -2796,15 +2796,25 @@ class TestTitleUniqueness:
         assert db.get_session("s1")["title"] is None
         assert db.get_session("s2")["title"] is None
 
-    def test_get_session_by_title(self, db):
+    def test_get_sessions_by_title(self, db):
         db.create_session("s1", "cli")
         db.set_session_title("s1", "refactoring auth")
-        result = db.get_session_by_title("refactoring auth")
-        assert result is not None
-        assert result["id"] == "s1"
+        result = db.get_sessions_by_title("refactoring auth")
+        assert len(result) == 1
+        assert result[0]["id"] == "s1"
 
-    def test_get_session_by_title_not_found(self, db):
-        assert db.get_session_by_title("nonexistent") is None
+    def test_get_sessions_by_title_not_found(self, db):
+        assert db.get_sessions_by_title("nonexistent") == []
+
+    def test_get_sessions_by_title_duplicate(self, db):
+        db.create_session("s1", "cli")
+        db.create_session("s2", "cli")
+        db.set_session_title("s1", "duplicate title")
+        db.set_session_title("s2", "duplicate title")
+        result = db.get_sessions_by_title("duplicate title")
+        assert len(result) == 2
+        ids = {r["id"] for r in result}
+        assert ids == {"s1", "s2"}
 
     def test_get_session_title(self, db):
         db.create_session("s1", "cli")

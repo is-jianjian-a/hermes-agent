@@ -1309,10 +1309,10 @@ class SessionDB:
                     (SCHEMA_VERSION,),
                 )
 
-        # Unique title index — always ensure it exists
+        # Title index for fast lookup — non-unique, duplicates allowed
         try:
             cursor.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
+                "CREATE INDEX IF NOT EXISTS idx_sessions_title "
                 "ON sessions(title) WHERE title IS NOT NULL"
             )
         except sqlite3.OperationalError:
@@ -1884,46 +1884,14 @@ class SessionDB:
         return row is not None
 
     def set_session_title(self, session_id: str, title: str) -> bool:
-        """Set or update a session's title.
+        """Set or clear the title for a session.
 
-        Returns True if session was found and title was set.
-        Raises ValueError if title is already in use by another session,
-        or if the title fails validation (too long, invalid characters).
+        Returns True if the session was found and updated, False otherwise.
         Empty/whitespace-only strings are normalized to None (clearing the title).
         """
         title = self.sanitize_title(title)
         def _do(conn):
-            if title:
-                # Check uniqueness (allow the same session to keep its own title)
-                cursor = conn.execute(
-                    "SELECT id FROM sessions WHERE title = ? AND id != ?",
-                    (title, session_id),
-                )
-                conflict = cursor.fetchone()
-                if conflict:
-                    conflict_id = conflict["id"]
-                    # A compression continuation is the live, projected-forward
-                    # head of its conversation; its compressed predecessors are
-                    # ended and hidden from the session list (list_sessions_rich
-                    # projects roots → tip). When the title that "conflicts" is
-                    # held by such a hidden ancestor, the user has no way to free
-                    # it — renaming the visible tip back to the base name would
-                    # dead-end with "already in use by <session they can't see>".
-                    # Treat this as a transfer: move the title off the ancestor
-                    # onto the continuation. Uniqueness is preserved (still only
-                    # one session carries the exact title) and the parent-link
-                    # lineage is untouched.
-                    if self._is_compression_ancestor(
-                        conn, ancestor_id=conflict_id, descendant_id=session_id
-                    ):
-                        conn.execute(
-                            "UPDATE sessions SET title = NULL WHERE id = ?",
-                            (conflict_id,),
-                        )
-                    else:
-                        raise ValueError(
-                            f"Title '{title}' is already in use by session {conflict_id}"
-                        )
+            # Duplicate titles are allowed — no uniqueness check needed
             cursor = conn.execute(
                 "UPDATE sessions SET title = ? WHERE id = ?",
                 (title, session_id),
@@ -1993,25 +1961,24 @@ class SessionDB:
         rowcount = self._execute_write(_do)
         return rowcount > 0
 
-    def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
-        """Look up a session by exact title. Returns session dict or None."""
+    def get_sessions_by_title(self, title: str) -> List[Dict[str, Any]]:
+        """Look up sessions by exact title. Returns list of session dicts."""
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT * FROM sessions WHERE title = ?", (title,)
+                "SELECT * FROM sessions WHERE title = ? ORDER BY started_at DESC", (title,)
             )
-            row = cursor.fetchone()
-        return dict(row) if row else None
+            rows = cursor.fetchall()
+        return [dict(row) for row in rows]
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:
         """Resolve a title to a session ID, preferring the latest in a lineage.
 
-        If the exact title exists, returns that session's ID.
-        If not, searches for "title #N" variants and returns the latest one.
-        If the exact title exists AND numbered variants exist, returns the
-        latest numbered variant (the most recent continuation).
+        If one exact match exists, returns that session's ID.
+        If multiple exact matches exist, returns the most recent one.
+        If no exact match, searches for "title #N" variants and returns the latest one.
         """
-        # First try exact match
-        exact = self.get_session_by_title(title)
+        # First try exact matches
+        exact = self.get_sessions_by_title(title)
 
         # Also search for numbered variants: "title #2", "title #3", etc.
         # Escape SQL LIKE wildcards (%, _) in the title to prevent false matches
@@ -2028,7 +1995,8 @@ class SessionDB:
             # Return the most recent numbered variant
             return numbered[0]["id"]
         elif exact:
-            return exact["id"]
+            # Return the most recent exact match
+            return exact[0]["id"]
         return None
 
     def get_next_title_in_lineage(self, base_title: str) -> str:

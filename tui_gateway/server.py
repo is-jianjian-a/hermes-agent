@@ -4545,22 +4545,9 @@ def _(rid, params: dict) -> dict:
 
     found = db.get_session(target)
     if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        elif is_truthy_value(params.get("lazy", False)) and _child_run_active(target):
-            # Race: a watch window opened on a freshly-spawned subagent. The
-            # child relays `subagent.start` (which carries child_session_id and
-            # triggers the window) BEFORE its first run_conversation() flushes
-            # the DB row via _ensure_db_session, so db.get_session(target) is
-            # momentarily empty. On slower hosts (notably WSL2, where SQLite +
-            # process scheduling widen the gap) the window's resume consistently
-            # lands inside this window and used to hard-fail "session not found"
-            # — the frontend then 404'd on the REST messages fallback and the
-            # window spun forever. The child is provably live (_child_run_active),
-            # so proceed into the lazy branch with empty history; the live mirror
-            # streams the whole turn anyway and the row exists by upgrade time.
-            found = {}
+        found_list = db.get_sessions_by_title(target)
+        if found_list:
+            target = found_list[0]["id"]  # most recent match
         else:
             return _err(rid, 4007, "session not found")
 

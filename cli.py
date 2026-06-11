@@ -7882,13 +7882,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                                 _cprint(f"  {e}")
                         else:
                             # Session not created yet — defer the title
-                            # Check uniqueness proactively with the sanitized title
-                            existing = self._session_db.get_session_by_title(new_title)
+                            # Check if title exists (warn but allow duplicates)
+                            existing = self._session_db.get_sessions_by_title(new_title)
                             if existing:
-                                _cprint(f"  Title '{new_title}' is already in use by session {existing['id']}")
-                            else:
-                                self._pending_title = new_title
-                                _cprint(f"  Session title queued: {new_title} (will be saved on first message)")
+                                _cprint(f"  Note: title '{new_title}' is also used by {len(existing)} other session(s)")
+                            self._pending_title = new_title
+                            _cprint(f"  Session title queued: {new_title} (will be saved on first message)")
                     else:
                         from hermes_state import format_session_db_unavailable
                         _cprint(f"  {format_session_db_unavailable()}")
