@@ -1128,6 +1128,173 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
             return None
 
 
+def _session_archive_picker(db, sessions: list) -> None:
+    """Interactive curses-based session archive manager.
+
+    Shows session list with archive status. Keys:
+      a / Enter  - toggle archive status of selected session
+      h          - toggle hide/show archived sessions
+      q / Esc    - quit
+    """
+    if not sessions:
+        print("No sessions found.")
+        return
+
+    try:
+        import curses
+
+        hide_archived = False
+        cursor = 0
+        scroll_offset = 0
+
+        def _format_row(s, max_x):
+            title = (s.get("title") or "").strip()
+            preview = (s.get("preview") or "").strip()
+            msg_count = s.get("message_count", 0)
+            last_active = _relative_time(s.get("last_active"))
+            sid = s["id"][:16]
+            archived = s.get("archived", 0)
+
+            fixed_cols = 3 + 8 + 12 + 10 + 18 + 8  # arrow + count + active + archive + id + pad
+            name_width = max(20, max_x - fixed_cols)
+
+            if title:
+                name = title[:name_width]
+            elif preview:
+                name = preview[:name_width]
+            else:
+                name = sid
+
+            arch_mark = "[A]" if archived else "   "
+            return f"{name:<{name_width}}  {msg_count:>6}  {last_active:<10}  {arch_mark}  {sid}"
+
+        def _curses_archive(stdscr):
+            nonlocal hide_archived, cursor, scroll_offset
+            curses.curs_set(0)
+            if curses.has_colors():
+                curses.start_color()
+                curses.use_default_colors()
+                curses.init_pair(1, curses.COLOR_GREEN, -1)   # selected
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)  # header
+                curses.init_pair(3, curses.COLOR_CYAN, -1)    # info
+                curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)  # dim
+                curses.init_pair(5, curses.COLOR_RED, -1)     # archived
+
+            while True:
+                stdscr.clear()
+                max_y, max_x = stdscr.getmaxyx()
+                if max_y < 5 or max_x < 50:
+                    try:
+                        stdscr.addstr(0, 0, "Terminal too small")
+                    except curses.error:
+                        pass
+                    stdscr.refresh()
+                    stdscr.getch()
+                    return
+
+                # Filter
+                visible = [s for s in sessions if not (hide_archived and s.get("archived", 0))]
+
+                # Header
+                filter_text = " | hiding archived" if hide_archived else ""
+                header = f"  Archive manager — ↑↓ navigate  a=toggle  h=hide archived  q=quit{filter_text}"
+                try:
+                    stdscr.addnstr(0, 0, header, max_x - 1, curses.A_BOLD | (curses.color_pair(2) if curses.has_colors() else 0))
+                except curses.error:
+                    pass
+
+                # Column header
+                fixed_cols = 3 + 8 + 12 + 10 + 18 + 8
+                name_width = max(20, max_x - fixed_cols)
+                col_header = f"   {'Title / Preview':<{name_width}}  {'Msgs':>6}  {'Active':<10}  {'Arch'}  {'ID'}"
+                try:
+                    dim_attr = curses.color_pair(4) if curses.has_colors() else curses.A_DIM
+                    stdscr.addnstr(1, 0, col_header, max_x - 1, dim_attr)
+                except curses.error:
+                    pass
+
+                visible_rows = max_y - 4
+                visible_rows = max(visible_rows, 1)
+
+                if not visible:
+                    try:
+                        msg = "  No sessions match the current filter."
+                        stdscr.addnstr(3, 0, msg, max_x - 1, curses.A_DIM)
+                    except curses.error:
+                        pass
+                else:
+                    if cursor >= len(visible):
+                        cursor = len(visible) - 1
+                    cursor = max(cursor, 0)
+                    if cursor < scroll_offset:
+                        scroll_offset = cursor
+                    elif cursor >= scroll_offset + visible_rows:
+                        scroll_offset = cursor - visible_rows + 1
+
+                    for draw_i, i in enumerate(range(scroll_offset, min(len(visible), scroll_offset + visible_rows))):
+                        y = draw_i + 3
+                        if y >= max_y - 1:
+                            break
+                        s = visible[i]
+                        arrow = " → " if i == cursor else "   "
+                        row = arrow + _format_row(s, max_x - 3)
+                        attr = curses.A_NORMAL
+                        if i == cursor:
+                            attr = curses.A_BOLD | curses.color_pair(1) if curses.has_colors() else curses.A_BOLD
+                        elif s.get("archived", 0):
+                            attr = curses.color_pair(5) if curses.has_colors() else curses.A_DIM
+                        try:
+                            stdscr.addnstr(y, 0, row, max_x - 1, attr)
+                        except curses.error:
+                            pass
+
+                # Footer
+                footer_y = max_y - 1
+                total_archived = sum(1 for s in sessions if s.get("archived", 0))
+                footer = f"  {cursor + 1}/{len(visible)} visible | {total_archived}/{len(sessions)} archived"
+                if hide_archived:
+                    footer += " | press h to show archived"
+                try:
+                    stdscr.addnstr(footer_y, 0, footer, max_x - 1, curses.color_pair(4) if curses.has_colors() else curses.A_DIM)
+                except curses.error:
+                    pass
+
+                stdscr.refresh()
+                key = stdscr.getch()
+
+                if key in {curses.KEY_UP,}:
+                    if visible:
+                        cursor = (cursor - 1) % len(visible)
+                elif key in {curses.KEY_DOWN,}:
+                    if visible:
+                        cursor = (cursor + 1) % len(visible)
+                elif key in {curses.KEY_ENTER, 10, 13, ord("a")}:
+                    if visible:
+                        s = visible[cursor]
+                        new_state = not bool(s.get("archived", 0))
+                        db.set_session_archived(s["id"], new_state)
+                        s["archived"] = 1 if new_state else 0
+                elif key == ord("h"):
+                    hide_archived = not hide_archived
+                    cursor = 0
+                    scroll_offset = 0
+                elif key in {ord("q"), 27}:
+                    return
+
+        curses.wrapper(_curses_archive)
+
+    except Exception:
+        # Fallback: simple list
+        print("\n  Session archive manager (curses not available)\n")
+        for s in sessions:
+            title = (s.get("title") or "").strip()
+            preview = (s.get("preview") or "").strip()
+            label = title or preview or s["id"]
+            arch = "[ARCHIVED]" if s.get("archived", 0) else ""
+            print(f"  {s['id'][:20]}  {label[:40]:<40}  {arch}")
+        print("\n  Use 'hermes sessions archive <id>' to toggle archive status.")
+
+
 def _resolve_last_session(source: str = "cli") -> Optional[str]:
     """Look up the most recently-used session ID for a source."""
     db = None
@@ -12487,6 +12654,14 @@ def main():
         "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
     )
 
+    sessions_archive_tui = sessions_subparsers.add_parser(
+        "archive-tui",
+        help="Interactive archive manager — browse and toggle session archive status",
+    )
+    sessions_archive_tui.add_argument(
+        "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
+    )
+
     def _confirm_prompt(prompt: str) -> bool:
         """Prompt for y/N confirmation, safe against non-TTY environments."""
         try:
@@ -12684,6 +12859,17 @@ def main():
 
             relaunch(["--resume", selected_id])
             return  # won't reach here after execvp
+
+        elif action == "archive-tui":
+            limit = getattr(args, "limit", 500) or 500
+            sessions = db.list_sessions_rich(
+                include_archived=True, limit=limit
+            )
+            if not sessions:
+                print("No sessions found.")
+                db.close()
+                return
+            _session_archive_picker(db, sessions)
 
         elif action == "optimize":
             db_path = db.db_path
