@@ -87,6 +87,10 @@ Installers are built and uploaded to GitHub Releases manually. macOS/Windows sig
 
 The packaged app ships the Electron shell and a native React chat surface. On first launch it can install the Hermes Agent runtime into `HERMES_HOME` (`~/.hermes`, or `%LOCALAPPDATA%\hermes` on Windows) — the **same layout a CLI install uses**, so the two are interchangeable. Backend resolution first honours `HERMES_DESKTOP_HERMES_ROOT`, then a completed managed install, then a probed `hermes` on `PATH` (unless `HERMES_DESKTOP_IGNORE_EXISTING=1` is set), and finally an explicit `HERMES_DESKTOP_HERMES` command override for packagers/troubleshooting. The renderer (React, in `src/`) talks to a `hermes dashboard` backend over the `tui_gateway`/dashboard APIs and reuses the agent runtime rather than embedding `hermes --tui`. The install, backend-resolution, and self-update logic all live in `electron/main.cjs`.
 
+The macOS Companion uses a hybrid AppKit/SwiftUI + Electron architecture. See
+[Companion Architecture](COMPANION_ARCHITECTURE.md) for the framework choices,
+process bridge, performance principles, and cross-platform fallback.
+
 ### Verification
 
 Run before opening a PR (lint may surface pre-existing warnings but must exit cleanly):
