@@ -34,7 +34,12 @@ const {
   createCompanionStateStore,
   parseCompanionRequest
 } = require('./companion-window.cjs')
-const { mergeDisplayGeometry, readMacDisplayGeometry, selectCompanionDisplay } = require('./companion-native.cjs')
+const {
+  mergeDisplayGeometry,
+  nativeCompanionBinary,
+  readMacDisplayGeometry,
+  selectCompanionDisplay
+} = require('./companion-native.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
@@ -559,6 +564,11 @@ function registerMediaProtocol() {
 let mainWindow = null
 let companionWindow = null
 let companionCenterWindow = null
+let companionNativeProcess = null
+let companionNativeBuffer = ''
+let companionNativeSnapshotTimer = null
+let companionNativeSnapshotRunning = false
+let companionNativeLiveCache = { at: 0, sessions: [] }
 let companionStateStore = null
 let companionState = null
 let startupCompanionRequest = parseCompanionRequest(process.argv)
@@ -4990,10 +5000,278 @@ function persistCompanionState(patch = {}) {
   return companionState
 }
 
+function nativeCompanionIsRunning() {
+  return Boolean(companionNativeProcess && companionNativeProcess.exitCode == null && !companionNativeProcess.killed)
+}
+
+function writeNativeCompanion(payload) {
+  if (!nativeCompanionIsRunning() || !companionNativeProcess.stdin?.writable) return false
+  try {
+    companionNativeProcess.stdin.write(`${JSON.stringify(payload)}\n`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function stopNativeCompanion() {
+  if (companionNativeSnapshotTimer) {
+    clearInterval(companionNativeSnapshotTimer)
+    companionNativeSnapshotTimer = null
+  }
+  companionNativeSnapshotRunning = false
+  if (!nativeCompanionIsRunning()) {
+    companionNativeProcess = null
+    return
+  }
+  writeNativeCompanion({ type: 'quit' })
+  const child = companionNativeProcess
+  setTimeout(() => {
+    if (child.exitCode == null && !child.killed) child.kill('SIGTERM')
+  }, 800).unref()
+}
+
+async function buildNativeCompanionSnapshot() {
+  const params = new URLSearchParams({
+    archived: 'exclude',
+    limit: '30',
+    min_messages: '0',
+    offset: '0',
+    order: 'recent',
+    profile: 'all'
+  })
+  const [data, liveSessions] = await Promise.all([
+    mergeRemoteProfileSessions(params, configuredRemoteProfileNames()),
+    collectNativeCompanionLiveSessions()
+  ])
+  const liveKeys = new Set()
+  const liveRows = liveSessions.map(row => {
+    const profile = String(row?.profile || 'default')
+    const id = String(row?.session_key || row?.id || '')
+    liveKeys.add(`${profile}:${id}`)
+    if (row?.id) liveKeys.add(`${profile}:${row.id}`)
+    return {
+      id,
+      profile,
+      title: String(row?.title || ''),
+      preview: String(row?.preview || ''),
+      model: String(row?.model || ''),
+      status: ['starting', 'waiting', 'working'].includes(row?.status) ? row.status : 'idle',
+      started_at: Number(row?.started_at) || 0,
+      last_active: Number(row?.last_active ?? row?.started_at) || 0
+    }
+  })
+  const historyRows = rowsOf(data)
+    .map(row => ({
+      id: String(row?.id || ''),
+      profile: String(row?.profile || 'default'),
+      title: String(row?.title || ''),
+      preview: String(row?.preview || ''),
+      model: String(row?.model || ''),
+      status: row?.is_active ? 'working' : 'idle',
+      started_at: Number(row?.started_at) || 0,
+      last_active: Number(row?.last_active ?? row?.started_at) || 0
+    }))
+    .filter(row => row.id && !liveKeys.has(`${row.profile}:${row.id}`))
+  const rows = [...liveRows, ...historyRows]
+    .sort((left, right) => {
+      const ranks = { waiting: 0, working: 1, starting: 2, idle: 3 }
+      return (ranks[left.status] ?? 3) - (ranks[right.status] ?? 3) || right.last_active - left.last_active
+    })
+    .slice(0, 6)
+  return {
+    type: 'snapshot',
+    connected: true,
+    displayId: selectedCompanionDisplay()?.id || null,
+    sessions: rows
+  }
+}
+
+function requestNativeCompanionActiveList(wsUrl, profile, timeoutMs = 2_500) {
+  return new Promise(resolve => {
+    if (typeof WebSocket !== 'function') {
+      resolve([])
+      return
+    }
+    let settled = false
+    const finish = rows => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try {
+        socket.close()
+      } catch {
+        void 0
+      }
+      resolve(Array.isArray(rows) ? rows.map(row => ({ ...row, profile })) : [])
+    }
+    const socket = new WebSocket(wsUrl)
+    const timer = setTimeout(() => finish([]), timeoutMs)
+    socket.addEventListener('open', () => {
+      socket.send(
+        JSON.stringify({
+          id: 'hermes-native-companion',
+          jsonrpc: '2.0',
+          method: 'session.active_list',
+          params: {}
+        })
+      )
+    })
+    socket.addEventListener('message', event => {
+      try {
+        const message = JSON.parse(String(event.data || ''))
+        if (message.id !== 'hermes-native-companion') return
+        finish(message.result?.sessions || message.sessions || [])
+      } catch {
+        finish([])
+      }
+    })
+    socket.addEventListener('error', () => finish([]))
+    socket.addEventListener('close', () => finish([]))
+  })
+}
+
+async function collectNativeCompanionLiveSessions() {
+  const now = Date.now()
+  if (now - companionNativeLiveCache.at < 4_000) {
+    return companionNativeLiveCache.sessions
+  }
+
+  const primary = await ensureBackend(null)
+  const profilesResponse =
+    primary.authMode === 'oauth'
+      ? await fetchJsonViaOauthSession(`${primary.baseUrl}/api/profiles`, { timeoutMs: DEFAULT_FETCH_TIMEOUT_MS })
+      : await fetchJson(`${primary.baseUrl}/api/profiles`, primary.token, {
+          method: 'GET',
+          timeoutMs: DEFAULT_FETCH_TIMEOUT_MS
+        })
+  const configuredRemote = new Set(configuredRemoteProfileNames())
+  const names = new Set([primaryProfileKey()])
+  for (const profile of Array.isArray(profilesResponse?.profiles) ? profilesResponse.profiles : []) {
+    if (profile?.gateway_running || configuredRemote.has(profile?.name)) {
+      names.add(String(profile.name || '').trim())
+    }
+  }
+  names.delete('')
+
+  const results = await Promise.allSettled(
+    [...names].map(async profile => {
+      const wsUrl = await freshGatewayWsUrl(profile)
+      return requestNativeCompanionActiveList(wsUrl, profile)
+    })
+  )
+  const sessions = results.flatMap(result => (result.status === 'fulfilled' ? result.value : []))
+  companionNativeLiveCache = { at: Date.now(), sessions }
+  return sessions
+}
+
+async function refreshNativeCompanionSnapshot() {
+  if (companionNativeSnapshotRunning || !nativeCompanionIsRunning()) return
+  companionNativeSnapshotRunning = true
+  try {
+    writeNativeCompanion(await buildNativeCompanionSnapshot())
+  } catch (error) {
+    rememberLog(`Native Companion snapshot failed: ${error?.message || error}`)
+    writeNativeCompanion({
+      type: 'snapshot',
+      connected: false,
+      displayId: selectedCompanionDisplay()?.id || null,
+      sessions: []
+    })
+  } finally {
+    companionNativeSnapshotRunning = false
+  }
+}
+
+function handleNativeCompanionMessage(message) {
+  if (!message || typeof message !== 'object') return
+  if (message.type === 'openCenter') {
+    createCompanionCenterWindow({ focus: true })
+    return
+  }
+  if (message.type === 'openSession' && typeof message.sessionId === 'string') {
+    createSessionWindow(message.sessionId, typeof message.profile === 'string' ? message.profile : null)
+    return
+  }
+  if (message.type === 'setDisplay' && typeof message.displayId === 'string') {
+    const display = companionDisplays().find(item => item.id === message.displayId)
+    if (display) {
+      persistCompanionState({ displayId: display.id, position: null })
+      writeNativeCompanion({ type: 'display', displayId: display.id })
+    }
+    return
+  }
+  if (message.type === 'exitCompanion') {
+    persistCompanionState({ enabled: false })
+    stopNativeCompanion()
+    if (companionOnlyLaunch && (!companionCenterWindow || companionCenterWindow.isDestroyed())) app.quit()
+  }
+}
+
+function createNativeCompanion(mode = 'island') {
+  if (nativeCompanionIsRunning()) {
+    writeNativeCompanion({ type: 'mode', mode: mode === 'expanded' ? 'expanded' : 'island' })
+    return companionNativeProcess
+  }
+  const binary = nativeCompanionBinary({
+    appPath: app.getAppPath(),
+    resourcesPath: process.resourcesPath,
+    packaged: app.isPackaged
+  })
+  if (!binary) {
+    rememberLog('Native Companion binary is unavailable; falling back to Electron overlay.')
+    return null
+  }
+
+  companionNativeBuffer = ''
+  const child = spawn(binary, [], {
+    env: { ...process.env },
+    stdio: ['pipe', 'pipe', 'pipe']
+  })
+  companionNativeProcess = child
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', chunk => {
+    companionNativeBuffer += chunk
+    for (;;) {
+      const newline = companionNativeBuffer.indexOf('\n')
+      if (newline < 0) break
+      const line = companionNativeBuffer.slice(0, newline).trim()
+      companionNativeBuffer = companionNativeBuffer.slice(newline + 1)
+      if (!line) continue
+      try {
+        handleNativeCompanionMessage(JSON.parse(line))
+      } catch {
+        rememberLog(`Native Companion emitted invalid JSON: ${line.slice(0, 200)}`)
+      }
+    }
+  })
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', chunk => rememberLog(`[native companion] ${String(chunk).trim()}`))
+  child.on('error', error => rememberLog(`Native Companion failed: ${error?.message || error}`))
+  child.on('exit', (code, signal) => {
+    if (companionNativeProcess === child) companionNativeProcess = null
+    if (companionNativeSnapshotTimer) {
+      clearInterval(companionNativeSnapshotTimer)
+      companionNativeSnapshotTimer = null
+    }
+    rememberLog(`Native Companion exited code=${code ?? 'null'} signal=${signal ?? 'none'}`)
+  })
+  writeNativeCompanion({ type: 'display', displayId: selectedCompanionDisplay()?.id || null })
+  writeNativeCompanion({ type: 'mode', mode: mode === 'expanded' ? 'expanded' : 'island' })
+  void refreshNativeCompanionSnapshot()
+  companionNativeSnapshotTimer = setInterval(() => void refreshNativeCompanionSnapshot(), 2_000)
+  persistCompanionState({ enabled: true, mode: 'island' })
+  return child
+}
+
 function setCompanionMode(mode, { focus = false } = {}) {
   const normalized = mode === 'center' ? 'center' : mode === 'expanded' ? 'expanded' : 'island'
   if (normalized === 'center') {
     return createCompanionCenterWindow({ focus: true })
+  }
+  if (IS_MAC) {
+    companionCurrentMode = normalized
+    return createNativeCompanion(normalized)
   }
   if (!companionWindow || companionWindow.isDestroyed()) {
     return createCompanionWindow(normalized, { focus })
@@ -5007,6 +5285,11 @@ function setCompanionMode(mode, { focus = false } = {}) {
 }
 
 function createCompanionWindow(mode = 'island', { focus = true } = {}) {
+  if (IS_MAC) {
+    if (mode === 'center') return createCompanionCenterWindow({ focus })
+    companionCurrentMode = mode === 'expanded' ? 'expanded' : 'island'
+    return createNativeCompanion(companionCurrentMode)
+  }
   if (companionWindow && !companionWindow.isDestroyed()) {
     return setCompanionMode(mode, { focus })
   }
@@ -5117,7 +5400,13 @@ function createCompanionCenterWindow({ focus = true } = {}) {
   })
   companionCenterWindow.on('closed', () => {
     companionCenterWindow = null
-    if (companionOnlyLaunch && (!companionWindow || companionWindow.isDestroyed())) app.quit()
+    if (
+      companionOnlyLaunch &&
+      !nativeCompanionIsRunning() &&
+      (!companionWindow || companionWindow.isDestroyed())
+    ) {
+      app.quit()
+    }
   })
   persistCompanionState({ enabled: true, mode: 'island' })
   return companionCenterWindow
@@ -5382,6 +5671,7 @@ ipcMain.handle('hermes:companion:setDisplay', async (_event, displayId) => {
   const display = companionDisplays().find(item => item.id === String(displayId))
   if (!display) return { ok: false, error: 'display-not-found' }
   persistCompanionState({ displayId: display.id, position: null })
+  writeNativeCompanion({ type: 'display', displayId: display.id })
   if (companionWindow && !companionWindow.isDestroyed()) {
     const [width, height] = companionWindow.getSize()
     companionWindow.setBounds({ ...defaultCompanionPosition(width), width, height })
@@ -5390,6 +5680,7 @@ ipcMain.handle('hermes:companion:setDisplay', async (_event, displayId) => {
 })
 ipcMain.handle('hermes:companion:disable', async () => {
   persistCompanionState({ enabled: false })
+  stopNativeCompanion()
   companionWindow?.close()
   companionCenterWindow?.close()
   if (companionOnlyLaunch) app.quit()
@@ -5407,6 +5698,7 @@ ipcMain.handle('hermes:companion:contextMenu', async () => {
         checked: display.id === selectedCompanionDisplay()?.id,
         click: () => {
           persistCompanionState({ displayId: display.id, position: null })
+          writeNativeCompanion({ type: 'display', displayId: display.id })
           if (companionWindow && !companionWindow.isDestroyed()) {
             const [width, height] = companionWindow.getSize()
             companionWindow.setBounds({ ...defaultCompanionPosition(width), width, height })
@@ -5426,10 +5718,11 @@ ipcMain.handle('hermes:companion:contextMenu', async () => {
     {
       label: 'Exit Companion',
       click: () => {
-      persistCompanionState({ enabled: false })
-      companionWindow?.close()
+        persistCompanionState({ enabled: false })
+        stopNativeCompanion()
+        companionWindow?.close()
         companionCenterWindow?.close()
-      if (companionOnlyLaunch) app.quit()
+        if (companionOnlyLaunch) app.quit()
       }
     }
   ])
@@ -6584,6 +6877,7 @@ function configureSpellChecker() {
 }
 
 app.on('before-quit', () => {
+  stopNativeCompanion()
   // Quitting mid-install should stop the installer, not orphan it.
   if (bootstrapAbortController) {
     try {

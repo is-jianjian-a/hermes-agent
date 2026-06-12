@@ -9,6 +9,13 @@ function nativeGeometryBinary({ appPath, resourcesPath, packaged }) {
   return candidates.find(candidate => fs.existsSync(candidate)) || null
 }
 
+function nativeCompanionBinary({ appPath, resourcesPath, packaged }) {
+  const candidates = packaged
+    ? [path.join(resourcesPath, 'native-tools', 'hermes-companion-native')]
+    : [path.join(appPath, 'build', 'native-tools', 'hermes-companion-native')]
+  return candidates.find(candidate => fs.existsSync(candidate)) || null
+}
+
 function readMacDisplayGeometry(options) {
   if (process.platform !== 'darwin') return []
   const binary = nativeGeometryBinary(options)
@@ -47,6 +54,7 @@ function selectCompanionDisplay(displays, preferredId, primaryId) {
 
 module.exports = {
   mergeDisplayGeometry,
+  nativeCompanionBinary,
   nativeGeometryBinary,
   readMacDisplayGeometry,
   selectCompanionDisplay
