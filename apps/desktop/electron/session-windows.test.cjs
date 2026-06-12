@@ -74,6 +74,12 @@ test('buildSessionWindowUrl encodes the session id in the hash route', () => {
   assert.ok(url.indexOf('?win=secondary') < url.indexOf('#'))
 })
 
+test('buildSessionWindowUrl carries the owning profile before the hash route', () => {
+  const url = buildSessionWindowUrl('abc123', { devServer: 'http://localhost:5173', profile: 'work' })
+
+  assert.equal(url, 'http://localhost:5173/?win=secondary&profile=work#/abc123')
+})
+
 test('buildSessionWindowUrl builds a packaged file URL with the flag before the hash', () => {
   const url = buildSessionWindowUrl('abc', { rendererIndexPath: '/opt/app/index.html' })
 

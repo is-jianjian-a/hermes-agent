@@ -3076,8 +3076,10 @@ async def get_profiles_sessions(
     source_filter = source or None
     exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
     # Over-fetch per profile so the merged+sorted window is correct for the
-    # requested page. Capped so a huge profile can't blow up the response.
-    per_profile = min(max(limit + offset, limit), 500)
+    # requested page. Do not truncate the global result set at 500 rows.
+    safe_limit = min(max(1, limit), 500)
+    safe_offset = max(0, offset)
+    per_profile = safe_limit + safe_offset
 
     merged: List[Dict[str, Any]] = []
     total = 0
@@ -3133,13 +3135,13 @@ async def get_profiles_sessions(
 
     sort_key = "last_active" if order == "recent" else "started_at"
     merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
-    window = merged[offset:offset + limit]
+    window = merged[safe_offset:safe_offset + safe_limit]
     return {
         "sessions": window,
         "total": total,
         "profile_totals": profile_totals,
-        "limit": limit,
-        "offset": offset,
+        "limit": safe_limit,
+        "offset": safe_offset,
         "errors": errors,
     }
 
@@ -7420,6 +7422,96 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
         return {"session_id": sid, "messages": messages}
     finally:
         db.close()
+
+
+@app.get("/api/sessions/{session_id}/summary")
+async def get_session_summary(session_id: str, profile: Optional[str] = None):
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {
+            "session_id": db.resolve_resume_session_id(sid),
+            "summary": db.get_latest_context_summary(sid),
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/profiles/sessions/legacy")
+async def get_legacy_profile_sessions(
+    limit: int = 100,
+    offset: int = 0,
+    profile: str = "all",
+    query: str = "",
+):
+    from hermes_cli import profiles as profiles_mod
+    from hermes_cli.session_legacy import list_legacy_sessions
+    from hermes_state import SessionDB
+
+    if profile and profile != "all":
+        name, home = _cron_profile_home(profile)
+        targets = [(name, home)]
+    else:
+        targets = [(info.name, info.path) for info in profiles_mod.list_profiles()]
+
+    database_ids: Dict[str, set[str]] = {}
+    for name, home in targets:
+        db_path = Path(home) / "state.db"
+        if not db_path.exists():
+            database_ids[name] = set()
+            continue
+        db = SessionDB(db_path=db_path, read_only=True)
+        try:
+            database_ids[name] = {
+                str(row["id"]) for row in db._conn.execute("SELECT id FROM sessions").fetchall()
+            }
+        finally:
+            db.close()
+
+    rows = list_legacy_sessions(targets, database_ids)
+    needle = query.strip().lower()
+    if needle:
+        rows = [
+            row
+            for row in rows
+            if any(
+                needle in str(row.get(key) or "").lower()
+                for key in ("id", "title", "preview", "summary", "model", "source", "profile")
+            )
+        ]
+    start = max(0, offset)
+    size = min(max(1, limit), 500)
+    return {"sessions": rows[start:start + size], "total": len(rows), "limit": size, "offset": start}
+
+
+@app.get("/api/profiles/sessions/legacy/{profile}/{session_id}")
+async def get_legacy_profile_session(profile: str, session_id: str):
+    from hermes_cli.session_legacy import get_legacy_session
+
+    name, home = _cron_profile_home(profile)
+    try:
+        row = get_legacy_session(home, name, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not row:
+        raise HTTPException(status_code=404, detail="Legacy session not found")
+    return row
+
+
+@app.delete("/api/profiles/sessions/legacy/{profile}/{session_id}")
+async def delete_legacy_profile_session(profile: str, session_id: str):
+    from hermes_cli.session_legacy import delete_legacy_session
+
+    _name, home = _cron_profile_home(profile)
+    try:
+        deleted = delete_legacy_session(home, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Legacy session not found")
+    return {"ok": True}
 
 
 @app.delete("/api/sessions/{session_id}")

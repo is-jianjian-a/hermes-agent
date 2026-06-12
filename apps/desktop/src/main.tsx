@@ -8,6 +8,7 @@ import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router-dom'
 
 import App from './app'
+import { CompanionApp } from './app/companion'
 import { ErrorBoundary } from './components/error-boundary'
 import { HapticsProvider } from './components/haptics-provider'
 import { I18nProvider } from './i18n'
@@ -16,6 +17,8 @@ import { queryClient } from './lib/query-client'
 import { ThemeProvider } from './themes/context'
 
 installClipboardShim()
+
+const companionWindow = new URLSearchParams(window.location.search).get('win') === 'companion'
 
 // Dev-only: install __PERF_DRIVE__ + __PERF_PROBE__ on window so the
 // scripts/ harnesses can drive a synthetic stream + record render cost.
@@ -33,9 +36,7 @@ createRoot(document.getElementById('root')!).render(
         <I18nProvider>
           <ThemeProvider>
             <HapticsProvider>
-              <HashRouter>
-                <App />
-              </HashRouter>
+              <HashRouter>{companionWindow ? <CompanionApp /> : <App />}</HashRouter>
             </HapticsProvider>
           </ThemeProvider>
         </I18nProvider>

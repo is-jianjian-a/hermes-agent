@@ -23,6 +23,9 @@ def _ns(**kw):
         ignore_existing=False,
         hermes_root=None,
         cwd=None,
+        companion=None,
+        companion_command=False,
+        center=False,
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
@@ -244,6 +247,47 @@ def test_gui_source_mode_uses_renderer_build_and_electron(tmp_path, monkeypatch)
     assert mock_run.call_args_list[0].kwargs["cwd"] == desktop_dir
     assert mock_run.call_args_list[1].args[0] == ["/usr/bin/npm", "exec", "--", "electron", "."]
     assert mock_run.call_args_list[1].kwargs["cwd"] == desktop_dir
+
+
+def test_companion_source_mode_forwards_island_argument(tmp_path, monkeypatch):
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+    ok = subprocess.CompletedProcess([], 0)
+
+    with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._run_npm_install_deterministic", return_value=ok), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=True), \
+         patch("hermes_cli.main._write_desktop_build_stamp"), \
+         patch("hermes_cli.main.subprocess.run", side_effect=[ok, ok]) as mock_run, \
+         pytest.raises(SystemExit) as exc:
+        cli_main.cmd_gui(_ns(source=True, companion_command=True))
+
+    assert exc.value.code == 0
+    assert mock_run.call_args_list[1].args[0] == [
+        "/usr/bin/npm",
+        "exec",
+        "--",
+        "electron",
+        ".",
+        "--hermes-companion=island",
+    ]
+
+
+def test_companion_packaged_mode_forwards_center_argument(tmp_path, monkeypatch):
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+    packaged_exe = _make_packaged_executable(root, monkeypatch)
+    ok = subprocess.CompletedProcess([], 0)
+
+    with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=False), \
+         patch("hermes_cli.main._desktop_linux_sandbox_fixup", return_value=True), \
+         patch("hermes_cli.main.subprocess.run", return_value=ok) as mock_run, \
+         pytest.raises(SystemExit) as exc:
+        cli_main.cmd_gui(_ns(companion_command=True, center=True))
+
+    assert exc.value.code == 0
+    assert mock_run.call_args.args[0] == [str(packaged_exe), "--hermes-companion=center"]
 
 
 @pytest.mark.parametrize(

@@ -372,6 +372,32 @@ export interface SessionMessage {
   tool_name?: string
 }
 
+export interface LegacySessionInfo {
+  file_name: string
+  id: string
+  last_active: number | string | null
+  legacy_json: true
+  message_count: number
+  model: null | string
+  preview: string
+  profile: string
+  source: string
+  started_at: number | string | null
+  summary: string
+  title: string
+}
+
+export interface LegacySessionDetail extends LegacySessionInfo {
+  messages: SessionMessage[]
+}
+
+export interface LegacySessionsResponse {
+  limit: number
+  offset: number
+  sessions: LegacySessionInfo[]
+  total: number
+}
+
 export interface SessionMessagesResponse {
   messages: SessionMessage[]
   session_id: string
@@ -520,6 +546,7 @@ export interface ProfileCreatePayload {
 }
 
 export interface ProfileInfo {
+  gateway_running: boolean
   has_env: boolean
   is_default: boolean
   model: null | string

@@ -2450,6 +2450,7 @@ class SessionDB:
     # string content. The NUL byte is not legal in normal text, so this
     # cannot collide with real user content.
     _CONTENT_JSON_PREFIX = "\x00json:"
+    _CONTEXT_SUMMARY_PREFIX = "[CONTEXT COMPACTION"
 
     @classmethod
     def _encode_content(cls, content: Any) -> Any:
@@ -2793,6 +2794,30 @@ class SessionDB:
                     msg["tool_calls"] = []
             result.append(msg)
         return result
+
+    def get_latest_context_summary(self, session_id: str) -> Optional[str]:
+        """Return the newest persisted Hermes compaction summary."""
+        resolved = self.resolve_session_id(session_id)
+        if not resolved:
+            return None
+        resolved = self.resolve_resume_session_id(resolved)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT content
+                FROM messages
+                WHERE session_id = ? AND content LIKE ?
+                ORDER BY timestamp DESC, id DESC
+                """,
+                (resolved, f"{self._CONTEXT_SUMMARY_PREFIX}%"),
+            ).fetchall()
+        for row in rows:
+            content = self._decode_content(row["content"])
+            if isinstance(content, str):
+                marker = "summary below."
+                marker_at = content.lower().find(marker)
+                return content[marker_at + len(marker):].strip() if marker_at >= 0 else content.strip()
+        return None
 
     def get_messages_around(
         self,

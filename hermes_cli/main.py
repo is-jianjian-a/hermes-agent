@@ -1128,6 +1128,7 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
             return None
 
 
+
 def _resolve_last_session(source: str = "cli") -> Optional[str]:
     """Look up the most recently-used session ID for a source."""
     db = None
@@ -5467,6 +5468,10 @@ def cmd_gui(args: argparse.Namespace):
         env["HERMES_DESKTOP_HERMES_ROOT"] = str(Path(args.hermes_root).expanduser().resolve())
     if getattr(args, "cwd", None):
         env["HERMES_DESKTOP_CWD"] = str(Path(args.cwd).expanduser().resolve())
+    companion_mode = getattr(args, "companion", None)
+    if getattr(args, "companion_command", False):
+        companion_mode = "center" if getattr(args, "center", False) else "island"
+    launch_args = [f"--hermes-companion={companion_mode}"] if companion_mode else []
 
     source_mode = getattr(args, "source", False)
     skip_build = getattr(args, "skip_build", False)
@@ -5614,7 +5619,12 @@ def cmd_gui(args: argparse.Namespace):
 
     if source_mode:
         print("→ Launching Hermes Desktop from source build...")
-        launch_result = subprocess.run([npm, "exec", "--", "electron", "."], cwd=desktop_dir, env=env, check=False)
+        launch_result = subprocess.run(
+            [npm, "exec", "--", "electron", ".", *launch_args],
+            cwd=desktop_dir,
+            env=env,
+            check=False,
+        )
         sys.exit(launch_result.returncode)
 
     if packaged_executable is None:
@@ -5626,7 +5636,12 @@ def cmd_gui(args: argparse.Namespace):
         sys.exit(1)
 
     print(f"→ Launching packaged Hermes Desktop: {packaged_executable}")
-    launch_result = subprocess.run([str(packaged_executable)], cwd=desktop_dir, env=env, check=False)
+    launch_result = subprocess.run(
+        [str(packaged_executable), *launch_args],
+        cwd=desktop_dir,
+        env=env,
+        check=False,
+    )
     sys.exit(launch_result.returncode)
 
 
@@ -12727,6 +12742,11 @@ def main():
         "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
     )
 
+    sessions_archive_gui = sessions_subparsers.add_parser(
+        "archive-gui",
+        help="Open GUI window to browse and manage session archives",
+    )
+
     def _confirm_prompt(prompt: str) -> bool:
         """Prompt for y/N confirmation, safe against non-TTY environments."""
         try:
@@ -12924,6 +12944,24 @@ def main():
 
             relaunch(["--resume", selected_id])
             return  # won't reach here after execvp
+
+        elif action == "archive-gui":
+            db.close()
+            cmd_gui(
+                argparse.Namespace(
+                    source=False,
+                    skip_build=False,
+                    force_build=False,
+                    build_only=False,
+                    fake_boot=False,
+                    ignore_existing=False,
+                    hermes_root=None,
+                    cwd=None,
+                    companion="center",
+                    companion_command=False,
+                )
+            )
+            return
 
         elif action == "optimize":
             db_path = db.db_path

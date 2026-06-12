@@ -92,6 +92,17 @@ class TestSessionLifecycle:
         assert session["model"] == "test-model"
         assert session["ended_at"] is None
 
+    def test_latest_context_summary_ignores_ordinary_assistant_messages(self, db):
+        db.create_session(session_id="summary", source="cli")
+        db.append_message(session_id="summary", role="assistant", content="ordinary response")
+        db.append_message(
+            session_id="summary",
+            role="system",
+            content="[CONTEXT COMPACTION — REFERENCE ONLY]\nSummary below.\nDurable facts.",
+        )
+
+        assert db.get_latest_context_summary("summary") == "Durable facts."
+
 
     def test_get_nonexistent_session(self, db):
         assert db.get_session("nonexistent") is None
@@ -2771,15 +2782,18 @@ class TestSchemaInit:
 
 
 class TestTitleUniqueness:
-    """Tests for unique title enforcement and title-based lookups."""
+    """Tests for duplicate title support and title-based lookups."""
 
-    def test_duplicate_title_raises(self, db):
-        """Setting a title already used by another session raises ValueError."""
+    def test_duplicate_title_is_allowed(self, db):
+        """Different sessions may intentionally share a display title."""
         db.create_session("s1", "cli")
         db.create_session("s2", "cli")
         db.set_session_title("s1", "my project")
-        with pytest.raises(ValueError, match="already in use"):
-            db.set_session_title("s2", "my project")
+        assert db.set_session_title("s2", "my project") is True
+        assert {row["id"] for row in db.get_sessions_by_title("my project")} == {
+            "s1",
+            "s2",
+        }
 
     def test_same_session_can_keep_title(self, db):
         """A session can re-set its own title without error."""
